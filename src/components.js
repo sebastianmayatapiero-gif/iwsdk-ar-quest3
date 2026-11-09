@@ -5,5 +5,5 @@
  * LICENSE file in the root directory of this source tree.
  */
 import { defineComponents } from '@iwsdk/core';
-import { Robot } from './robot-component.js';
-export default defineComponents([Robot]);
+import { RaceState } from './race-components.js';
+export default defineComponents([RaceState]);

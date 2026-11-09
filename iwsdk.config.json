@@ -17,7 +17,12 @@
         "anchors": true,
         "planeDetection": true,
         "meshDetection": true,
-        "hitTest": true
+        "hitTest": true,
+        "depthSensing": {
+          "required": true,
+          "usage": "gpu-optimized",
+          "format": "float32"
+        }
       }
     },
     "input": {
@@ -30,13 +35,13 @@
       "camera": {
         "position": [
           0,
-          1.6,
-          1
+          1.22,
+          0.12
         ],
         "lookAt": [
           0,
-          0.95,
-          -1.95
+          0.86,
+          -0.7
         ]
       }
     },
@@ -49,7 +54,8 @@
       "spatialUI": {
         "kit": "horizon",
         "preferredColorScheme": "dark"
-      }
+      },
+      "camera": true
     }
   },
   "dev": {

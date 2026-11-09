@@ -1,0 +1,183 @@
+<!--
+  Panel del juego de carreras. Va detrás de la pista, mirando al jugador.
+  El minimapa (#minimap) recibe una textura dibujada en tiempo real desde
+  src/race/hud-system.js. Los textos usan sólo ASCII y acentos básicos.
+-->
+<style>
+  .panel-root {
+    flex-direction: column;
+    width: 600px;
+  }
+
+  .header {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 20px;
+    padding-left: 24px;
+    padding-right: 24px;
+    padding-bottom: 8px;
+  }
+
+  .eyebrow {
+    color: #6b5a00;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+  }
+
+  .eyebrow:dark {
+    color: #f5d90a;
+  }
+
+  .title {
+    color: #1c1d20;
+    font-size: 30px;
+    font-weight: 700;
+  }
+
+  .title:dark {
+    color: #fafaf7;
+  }
+
+  .status {
+    color: #1c1d20;
+    font-size: 20px;
+    padding-left: 24px;
+    padding-right: 24px;
+    padding-bottom: 12px;
+  }
+
+  .status:dark {
+    color: #8fe3ff;
+  }
+
+  .body {
+    flex-direction: row;
+    gap: 20px;
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+
+  .map {
+    width: 250px;
+    height: 250px;
+    border-radius: 14px;
+    background-color: #0e1116;
+  }
+
+  .stats {
+    flex-direction: column;
+    flex-grow: 1;
+    gap: 10px;
+  }
+
+  .stat {
+    flex-direction: column;
+    padding-top: 8px;
+    padding-bottom: 8px;
+    padding-left: 14px;
+    padding-right: 14px;
+    border-radius: 12px;
+    background-color: #e9eaee;
+  }
+
+  .stat:dark {
+    background-color: #1d2129;
+  }
+
+  .stat-label {
+    color: #55575e;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 1px;
+  }
+
+  .stat-label:dark {
+    color: #9aa0ab;
+  }
+
+  .stat-value {
+    color: #1c1d20;
+    font-size: 26px;
+    font-weight: 700;
+  }
+
+  .stat-value:dark {
+    color: #fafaf7;
+  }
+
+  .buttons {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding-top: 16px;
+    padding-left: 24px;
+    padding-right: 24px;
+    padding-bottom: 22px;
+  }
+
+  .button-label {
+    transform-translate-y: 1px;
+  }
+</style>
+<Panel class="panel-root">
+  <div class="header">
+    <div class="eyebrow">MESA RACER</div>
+    <div class="title">Carrera AR</div>
+  </div>
+  <div id="status-text" class="status">Pulsa Iniciar para correr</div>
+  <div class="body">
+    <img id="minimap" class="map" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" />
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-label">VIDAS</div>
+        <div id="lives-value" class="stat-value">3 / 3</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">TIEMPO</div>
+        <div id="time-value" class="stat-value">0:00.0</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">PROGRESO</div>
+        <div id="progress-value" class="stat-value">0 %</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">VELOCIDAD</div>
+        <div id="speed-value" class="stat-value">0 km/h</div>
+      </div>
+    </div>
+  </div>
+  <div class="buttons">
+    <Button id="start-button">
+      <ButtonIcon>
+        <Play></Play>
+      </ButtonIcon>
+      <ButtonLabel class="button-label">Iniciar</ButtonLabel>
+    </Button>
+    <Button id="restart-button" variant="secondary">
+      <ButtonIcon>
+        <RotateCcw></RotateCcw>
+      </ButtonIcon>
+      <ButtonLabel class="button-label">Reiniciar</ButtonLabel>
+    </Button>
+    <Button id="place-button" variant="secondary">
+      <ButtonIcon>
+        <Move></Move>
+      </ButtonIcon>
+      <ButtonLabel class="button-label">Mover pista</ButtonLabel>
+    </Button>
+    <Button id="xr-button">
+      <ButtonIcon>
+        <RectangleGoggles></RectangleGoggles>
+      </ButtonIcon>
+      <ButtonLabel class="button-label">Entrar en RA</ButtonLabel>
+    </Button>
+    <Button id="exit-button" variant="secondary" style="display: none">
+      <ButtonIcon>
+        <LogIn></LogIn>
+      </ButtonIcon>
+      <ButtonLabel class="button-label">Salir</ButtonLabel>
+    </Button>
+  </div>
+</Panel>

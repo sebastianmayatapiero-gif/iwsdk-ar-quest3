@@ -8,8 +8,11 @@
  */
 import { DataTexture, LinearFilter, LinearMipmapLinearFilter, RepeatWrapping, RGBAFormat, SRGBColorSpace, UnsignedByteType } from '@iwsdk/core';
 
-export const ROAD_HALF_WIDTH = 0.09;
-export const LANE_OFFSET = 0.055;
+/** Calzada de tres carriles (centro de cada carril a ±LANE_OFFSET y 0). */
+export const ROAD_HALF_WIDTH = 0.095;
+export const LANE_OFFSET = 0.052;
+/** Posición (u de la textura) de la línea entre el carril izquierdo y el central. */
+const LANE_DIVIDER_U = 0.09 + (1 - 0.18) / 3;
 export const SAMPLE_STEP = 0.02;
 /** Metros de pista que ocupa una repetición de la textura. */
 export const TEXTURE_REPEAT_LENGTH = 0.4;
@@ -84,9 +87,9 @@ function buildCenterline() {
 export const ZONES = [
   { type: 'mud', start: 5.0, end: 6.0, gear: 2 },
   { type: 'curve', start: 9.9, end: 12.3, gear: 2, limitKmh: 45 },
-  { type: 'hill', start: 13.0, end: 14.2, gear: 2, height: 0.03 },
+  { type: 'hill', start: 13.0, end: 14.2, gear: 2, height: 0.045 },
   { type: 'mud', start: 19.0, end: 20.0, gear: 2 },
-  { type: 'hill', start: 23.2, end: 24.4, gear: 1, height: 0.04 },
+  { type: 'hill', start: 23.2, end: 24.4, gear: 1, height: 0.055 },
   { type: 'curve', start: 25.2, end: 28.2, gear: 2, limitKmh: 45 },
   { type: 'ramp', start: 30.4, end: 31.0, gear: 4, minKmh: 75 },
 ];
@@ -109,6 +112,12 @@ export function upcomingZone(s, lookAhead) {
     }
   }
   return null;
+}
+
+/** Pendiente de la pista en `s` (metros de altura por metro de recorrido). */
+export function slopeAt(s) {
+  const e = 0.02;
+  return (elevationAt(s + e) - elevationAt(s - e)) / (2 * e);
 }
 
 /** Altura extra de la pista en `s` (las subidas son una loma suave). */
@@ -181,8 +190,8 @@ export function samplePose(s, out) {
 }
 
 /**
- * Textura del asfalto: gris con grano, bordillos rojos y blancos y una línea
- * central discontinua. Se repite a lo largo de la pista.
+ * Textura del asfalto: gris con grano, bordillos rojos y blancos y dos líneas
+ * discontinuas que separan los tres carriles. Se repite a lo largo de la pista.
  */
 export function createRoadTexture() {
   const w = 64;
@@ -201,7 +210,7 @@ export function createRoadTexture() {
         [r, g, b] = red ? [214, 40, 40] : [240, 240, 240];
       } else if (u < 0.09 || u > 0.91) {
         [r, g, b] = [235, 235, 235];
-      } else if (Math.abs(u - 0.5) < 0.018 && Math.floor(v * 4) % 2 === 0) {
+      } else if (Math.min(Math.abs(u - LANE_DIVIDER_U), Math.abs(u - (1 - LANE_DIVIDER_U))) < 0.016 && Math.floor(v * 4) % 2 === 0) {
         [r, g, b] = [246, 246, 238];
       } else {
         const grain = (random() - 0.5) * 18;

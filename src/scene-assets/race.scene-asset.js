@@ -225,12 +225,12 @@ export function createSteeringWheel() {
   spinner.add(mesh(new BoxGeometry(spokeLength, 0.03, 0.01), cockpit.rim, -(0.03 + spokeLength / 2), 0, 0));
   spinner.add(mesh(new BoxGeometry(spokeLength, 0.03, 0.01), cockpit.rim, 0.03 + spokeLength / 2, 0, 0));
   spinner.add(mesh(new BoxGeometry(0.026, spokeLength, 0.01), cockpit.rim, 0, -(0.03 + spokeLength / 2), 0));
-  // Botones: rojo (frenar) a la izquierda y azul (acelerar) a la derecha.
+  // Botones: azul (acelerar) a la izquierda y rojo (frenar) a la derecha.
   const buttonGeo = new CylinderGeometry(buttonRadius, buttonRadius, 0.01, 20);
-  const brake = mesh(buttonGeo, cockpit.brake, -buttonOffset, 0, 0.011);
+  const brake = mesh(buttonGeo, cockpit.brake, buttonOffset, 0, 0.011);
   brake.name = 'brake-button';
   brake.rotation.x = Math.PI / 2;
-  const throttle = mesh(buttonGeo, cockpit.throttle, buttonOffset, 0, 0.011);
+  const throttle = mesh(buttonGeo, cockpit.throttle, -buttonOffset, 0, 0.011);
   throttle.name = 'throttle-button';
   throttle.rotation.x = Math.PI / 2;
   spinner.add(brake, throttle);

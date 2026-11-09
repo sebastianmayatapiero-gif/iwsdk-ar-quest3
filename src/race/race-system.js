@@ -7,8 +7,10 @@
  *  - tramos que piden cambiar de marcha: subidas, barro, curvas y rampa,
  *  - choques con obstáculos (salen volando con física), vidas y meta.
  *
- * Coordenadas locales de la pista ("race-root"): +X a la derecha del
- * jugador, +Y arriba, +Z hacia el jugador. El carro mira hacia -Z.
+ * "race-root" es el ancla colocada sobre la mesa y mira al jugador (+Z hacia
+ * él); de ella cuelgan la cabina y el panel. La pista vive en "track-frame",
+ * hijo del ancla girado TRACK_YAW. Coordenadas de la pista: +X a la derecha,
+ * +Y arriba, +Z hacia el extremo cercano. El carro mira hacia -Z.
  */
 import {
   BufferAttribute,
@@ -51,6 +53,7 @@ import {
   elevationAt,
   ROAD_HALF_WIDTH,
   samplePose,
+  slopeAt,
   TEXTURE_REPEAT_LENGTH,
   TRACK,
   upcomingZone,
@@ -60,8 +63,14 @@ import {
 
 /** Altura del asfalto: un poco por encima de la base para evitar parpadeos. */
 const ROAD_Y = PLAY_AREA.lift + PLAY_AREA.height + 0.0015;
-/** Posición fija del carro: algo por delante del centro para que el volante no lo tape. */
-export const CAR_Z = -0.04;
+/** Posición fija del carro dentro de la pista (+Z = hacia el jugador). */
+export const CAR_Z = 0.02;
+/**
+ * Giro horizontal de la pista respecto al jugador (unos 20°): al verla un poco
+ * en diagonal se aprecian mejor las subidas y los saltos. El volante y la
+ * palanca siguen mirando al jugador de frente.
+ */
+export const TRACK_YAW = -0.35;
 const VIEW_BEHIND = PLAY_AREA.length / 2 - CAR_Z + 0.03;
 const VIEW_AHEAD = PLAY_AREA.length / 2 + CAR_Z + 0.03;
 const RIBBON_SEGMENTS = 80;
@@ -150,12 +159,18 @@ export class RaceSystem extends createSystem({
     this.root.addComponent(RaceState, { phase: RacePhase.Ready, lives: 3, placed: false, gear: 1 });
     this.root.object3D.position.fromArray(DEFAULT_ROOT_POSITION);
 
+    // Marco de la pista, girado para verla un poco en diagonal.
+    const trackFrame = new Group();
+    trackFrame.name = 'track-frame';
+    trackFrame.rotation.y = TRACK_YAW;
+    this.track = world.createTransformEntity(trackFrame, { parent: this.root });
+
     // Base translúcida flotante con borde luminoso.
     const baseObject = createTrackBase();
     baseObject.traverse((child) => {
       child.receiveShadow = true;
     });
-    this.base = world.createTransformEntity(baseObject, { parent: this.root });
+    this.base = world.createTransformEntity(baseObject, { parent: this.track });
     this.base.addComponent(DepthOccludable);
 
     // Cinta de asfalto que se regenera cada frame alrededor del carro.
@@ -173,7 +188,9 @@ export class RaceSystem extends createSystem({
     this.roadPositions = new Float32Array(vertexCount * 3);
     this.roadUvs = new Float32Array(vertexCount * 2);
     this.roadColors = new Float32Array(vertexCount * 3).fill(1);
-    const normals = new Float32Array(vertexCount * 3);
+    // Normales por fila: se inclinan en las subidas para que la luz las marque.
+    this.roadNormals = new Float32Array(vertexCount * 3);
+    const normals = this.roadNormals;
     for (let i = 0; i < vertexCount; i += 1) {
       normals[i * 3 + 1] = 1;
     }
@@ -204,7 +221,7 @@ export class RaceSystem extends createSystem({
     roadMesh.frustumCulled = false;
     roadMesh.receiveShadow = true;
     this.roadGeometry = geometry;
-    this.road = world.createTransformEntity(roadMesh, { parent: this.root });
+    this.road = world.createTransformEntity(roadMesh, { parent: this.track });
     this.road.addComponent(DepthOccludable);
 
     const clipped = (object) => {
@@ -218,7 +235,7 @@ export class RaceSystem extends createSystem({
     };
 
     // Línea de meta.
-    this.finish = world.createTransformEntity(clipped(createFinishLine(ROAD_HALF_WIDTH * 2)), { parent: this.root });
+    this.finish = world.createTransformEntity(clipped(createFinishLine(ROAD_HALF_WIDTH * 2)), { parent: this.track });
     this.finish.addComponent(DepthOccludable);
 
     // Rampa y señales de límite de velocidad de las curvas.
@@ -236,7 +253,7 @@ export class RaceSystem extends createSystem({
         continue;
       }
       object.visible = false;
-      const entity = world.createTransformEntity(clipped(object), { parent: this.root });
+      const entity = world.createTransformEntity(clipped(object), { parent: this.track });
       entity.addComponent(DepthOccludable);
       this.zoneProps.push({ zone, entity, lateral });
     }
@@ -247,7 +264,7 @@ export class RaceSystem extends createSystem({
       child.castShadow = true;
     });
     carObject.position.set(0, ROAD_Y, CAR_Z);
-    this.car = world.createTransformEntity(carObject, { parent: this.root });
+    this.car = world.createTransformEntity(carObject, { parent: this.track });
     this.car.addComponent(DepthOccludable);
 
     // Reserva de obstáculos que se reutilizan al pasar por la ventana visible.
@@ -262,17 +279,22 @@ export class RaceSystem extends createSystem({
           child.castShadow = true;
         });
         object.visible = false;
-        const entity = world.createTransformEntity(object, { parent: this.root });
+        const entity = world.createTransformEntity(object, { parent: this.track });
         entity.addComponent(DepthOccludable);
         this.pools[type].push(entity);
       }
     }
 
     // Indicador de colocación: lo mueve EnvironmentRaycastSystem.
-    const reticleObject = createPlacementReticle();
+    // El rectángulo del indicador se gira igual que la pista.
+    const reticleShape = createPlacementReticle();
+    reticleShape.rotation.y = TRACK_YAW;
+    const reticleObject = new Group();
+    reticleObject.name = 'placement-reticle';
+    reticleObject.add(reticleShape);
     reticleObject.visible = false;
     this.reticle = world.createTransformEntity(reticleObject);
-    this.reticleMaterial = reticleObject.children[0].material;
+    this.reticleMaterial = reticleShape.children[0].material;
 
     this.rebuildStaticCollider();
   }
@@ -288,11 +310,12 @@ export class RaceSystem extends createSystem({
     // tan fina como la base, las piezas rápidas la atravesarían.
     const thickness = 0.1;
     const top = PLAY_AREA.lift + PLAY_AREA.height;
-    this.root.object3D.updateWorldMatrix(true, false);
+    const frame = this.track.object3D;
+    frame.updateWorldMatrix(true, false);
     this.vecA.set(0, top - thickness / 2, 0);
-    this.root.object3D.localToWorld(this.vecA);
+    frame.localToWorld(this.vecA);
     holder.position.copy(this.vecA);
-    holder.quaternion.copy(this.root.object3D.quaternion);
+    frame.getWorldQuaternion(holder.quaternion);
     this.tableCollider = this.world.createTransformEntity(holder);
     this.tableCollider.addComponent(PhysicsShape, {
       shape: PhysicsShapeType.Box,
@@ -355,7 +378,7 @@ export class RaceSystem extends createSystem({
     }
     this.setPhase(RacePhase.Racing);
     // La fuente del panel no tiene tildes ni "¡": los mensajes van en ASCII.
-    this.setStatus('Acelera con el boton azul y esquiva los obstaculos');
+    this.setStatus('Acelera con el pulgar izquierdo (azul) y esquiva los obstaculos');
     this.sound.countdown();
     this.sound.startEngine();
   }
@@ -709,8 +732,10 @@ export class RaceSystem extends createSystem({
     const height = OBSTACLE_HEIGHT[obstacle.type];
     this.toLocal(obstacle.s, obstacle.lateral, this.localTmp);
     this.vecA.set(this.localTmp.x, ROAD_Y + elevationAt(obstacle.s) + height / 2 + 0.002, this.localTmp.z);
-    this.root.object3D.updateWorldMatrix(true, false);
-    this.root.object3D.localToWorld(this.vecA);
+    const frame = this.track.object3D;
+    frame.updateWorldMatrix(true, false);
+    frame.localToWorld(this.vecA);
+    frame.getWorldQuaternion(this.quatA);
 
     const model = OBSTACLE_FACTORIES[obstacle.type]();
     model.position.y = -height / 2;
@@ -721,10 +746,10 @@ export class RaceSystem extends createSystem({
     holder.name = `debris-${obstacle.type}`;
     holder.add(model);
     holder.position.copy(this.vecA);
-    holder.quaternion.copy(this.root.object3D.quaternion);
+    holder.quaternion.copy(this.quatA);
 
     const side = Math.sign(obstacle.lateral - carOffset) || 1;
-    this.vecB.set(side * 0.45, 0.8, -0.3).applyQuaternion(this.root.object3D.quaternion);
+    this.vecB.set(side * 0.45, 0.8, -0.3).applyQuaternion(this.quatA);
     const entity = this.world.createTransformEntity(holder);
     entity.addComponent(PhysicsShape, {
       shape: PhysicsShapeType.Box,
@@ -784,20 +809,24 @@ export class RaceSystem extends createSystem({
     samplePose(distance, this.carPose);
 
     // Planos de recorte en coordenadas de mundo (la pista no sale de la base).
-    const rootObject = this.root.object3D;
-    rootObject.updateWorldMatrix(true, false);
+    const frame = this.track.object3D;
+    frame.updateWorldMatrix(true, false);
     for (let i = 0; i < this.clipPlanes.length; i += 1) {
-      this.clipPlanes[i].copy(this.clipPlanesLocal[i]).applyMatrix4(rootObject.matrixWorld);
+      this.clipPlanes[i].copy(this.clipPlanesLocal[i]).applyMatrix4(frame.matrixWorld);
     }
 
-    // El carro sigue la altura de la pista (subidas) y del salto.
-    this.car.object3D.position.y = ROAD_Y + elevationAt(distance) + this.jumpHeight(distance);
+    // El carro sigue la altura de la pista (subidas) y del salto, y se
+    // inclina con la pendiente.
+    const carObject = this.car.object3D;
+    carObject.position.y = ROAD_Y + elevationAt(distance) + this.jumpHeight(distance);
+    carObject.rotation.x = Math.atan(slopeAt(distance));
 
     // Cinta de asfalto con color por tramo (barro, curva, subida).
     const span = VIEW_BEHIND + VIEW_AHEAD;
     const positions = this.roadPositions;
     const uvs = this.roadUvs;
     const colors = this.roadColors;
+    const normals = this.roadNormals;
     for (let i = 0; i <= RIBBON_SEGMENTS; i += 1) {
       const s = distance - VIEW_BEHIND + (span * i) / RIBBON_SEGMENTS;
       const y = ROAD_Y + elevationAt(s);
@@ -811,6 +840,18 @@ export class RaceSystem extends createSystem({
       positions[p] = right.x;
       positions[p + 1] = y;
       positions[p + 2] = right.z;
+      // Normal = arriba menos pendiente × dirección de avance (local).
+      const slope = slopeAt(s);
+      const h = right.heading;
+      const nx = -slope * Math.sin(h);
+      const nz = slope * Math.cos(h);
+      const inv = 1 / Math.sqrt(nx * nx + 1 + nz * nz);
+      for (let k = 0; k < 2; k += 1) {
+        const n = i * 6 + k * 3;
+        normals[n] = nx * inv;
+        normals[n + 1] = inv;
+        normals[n + 2] = nz * inv;
+      }
       const v = s / TEXTURE_REPEAT_LENGTH;
       uvs[i * 4] = 0;
       uvs[i * 4 + 1] = v;
@@ -829,6 +870,7 @@ export class RaceSystem extends createSystem({
     attributes.position.needsUpdate = true;
     attributes.uv.needsUpdate = true;
     attributes.color.needsUpdate = true;
+    attributes.normal.needsUpdate = true;
 
     // Línea de meta, rampa y señales.
     this.placeProp(this.finish.object3D, FINISH_DISTANCE, 0, distance);

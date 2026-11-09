@@ -1,36 +1,80 @@
 /**
- * Cabina: volante, botones de frenar/acelerar y palanca de cambios.
+ * Cabina: volante, botones de acelerar/frenar y palanca de cambios.
  *
- *  - Volante: apoya las manos en el aro (sin pellizcar) y gira siguiendo su
- *    posición. Con las dos manos usa el ángulo entre ellas; con una, cómo
- *    gira alrededor del centro. Sin manos vuelve solo al centro.
- *  - Botones: rojo (izquierda) frena y azul (derecha) acelera mientras la
- *    punta de un dedo (pulgar o índice) los toca. Con controles: gatillo
- *    izquierdo frena y derecho acelera.
- *  - Palanca secuencial: agarra el pomo, empújalo hacia adelante para subir
- *    de marcha o tira hacia atrás para bajar. Vuelve sola al centro.
+ *  - Volante: sólo se mueve con prensión digitopalmar (índice, medio y anular
+ *    flexionados contra la palma, pulgar libre) y sólo en las empuñaduras de
+ *    las 9 (mano izquierda) y las 3 (mano derecha), junto a los botones.
+ *    Con las dos manos usa el ángulo entre ellas; con una, cómo gira
+ *    alrededor del centro. Sin manos vuelve solo al centro.
+ *  - Botones: azul (izquierda) acelera y rojo (derecha) frena mientras el
+ *    pulgar está apoyado encima. Con controles: gatillo izquierdo acelera y
+ *    derecho frena; el botón lateral (squeeze) equivale a cerrar la mano.
+ *  - Palanca secuencial: sólo con agarre de bola (dedos semiflexionados
+ *    rodeando el pomo y pulgar separado; una pinza no sirve). Empuja hacia
+ *    adelante para subir de marcha o tira hacia atrás para bajar. Vuelve
+ *    sola al centro.
  *  - Teclado (escritorio): flechas o A/D giran, W/flecha arriba acelera,
  *    S/flecha abajo frena, E sube y Q baja de marcha.
  *
  * Escribe steer, throttle y brake en RaceState; los cambios llaman a
  * RaceSystem.shift().
  */
-import { createSystem, Grabbed, OneHandGrabbable, Vector3, VisibilityState } from '@iwsdk/core';
+import { createSystem, Vector3, VisibilityState } from '@iwsdk/core';
 import { RaceState } from '../race-components.js';
-import { createGearKnob, createGearLever, createSteeringWheel, LEVER, PLAY_AREA, WHEEL } from '../scene-assets/race.scene-asset.js';
+import { createGearKnob, createGearLever, createSteeringWheel, LEVER, WHEEL } from '../scene-assets/race.scene-asset.js';
 import { RaceSystem } from './race-system.js';
 
-/** Posición de la cabina en coordenadas de la pista (delante del borde cercano). */
-const WHEEL_POSITION = [0, 0, PLAY_AREA.length / 2 + 0.07];
-const LEVER_POSITION = [0.22, 0, PLAY_AREA.length / 2 + 0.11];
+/** Posición de la cabina en coordenadas del ancla (delante de la pista). */
+export const WHEEL_POSITION = [0, 0, 0.47];
+const LEVER_POSITION = [0.22, 0, 0.5];
 const MAX_WHEEL_ANGLE = 1.75;
 const FULL_STEER_ANGLE = 1.4;
 const DEAD_ZONE = 0.09;
 // El punto de agarre de la mano está en la palma, unos 5 cm fuera del aro.
 const RIM_TOLERANCE = 0.075;
+const RIM_RELEASE_TOLERANCE = 0.1;
 const RIM_DEPTH = 0.1;
-const TIP_JOINTS = ['thumb-tip', 'index-finger-tip'];
+/** Media apertura (rad) de las empuñaduras de las 9 y las 3. */
+const GRIP_ZONE = 0.5;
+/** Índice de flexión (punta-muñeca / nudillo-muñeca): ~2 extendido, ~1 cerrado. */
+const PALMAR_MAX_CURL = 1.45;
+const BALL_MIN_CURL = 1.35;
+const BALL_MAX_CURL = 1.85;
+const BALL_MIN_THUMB_GAP = 0.035;
+// El centro de la mano (puntas + base del medio) queda unos cm por encima del
+// pomo cuando la palma se apoya sobre él.
+const KNOB_GRAB_DISTANCE = 0.065;
+const KNOB_RELEASE_DISTANCE = 0.11;
 const HANDS = ['left', 'right'];
+const JOINTS = [
+  'wrist',
+  'thumb-tip',
+  'index-finger-phalanx-proximal',
+  'index-finger-tip',
+  'middle-finger-metacarpal',
+  'middle-finger-phalanx-proximal',
+  'middle-finger-tip',
+  'ring-finger-phalanx-proximal',
+  'ring-finger-tip',
+];
+
+function createHandState() {
+  const joints = {};
+  for (const name of JOINTS) {
+    joints[name] = new Vector3();
+  }
+  return {
+    present: false,
+    tracked: false,
+    joints,
+    grip: new Vector3(),
+    grasp: new Vector3(),
+    curl: { index: 2, middle: 2, ring: 2 },
+    thumbGap: 0,
+    squeeze: 0,
+    trigger: 0,
+  };
+}
 
 export class CockpitSystem extends createSystem({
   roots: { required: [RaceState] },
@@ -39,14 +83,15 @@ export class CockpitSystem extends createSystem({
     this.race = this.world.getSystem(RaceSystem);
     this.vec = new Vector3();
     this.local = new Vector3();
+    this.hands = { left: createHandState(), right: createHandState() };
     this.handLocal = { left: new Vector3(), right: new Vector3() };
-    this.onRim = { left: false, right: false };
+    this.wheelHeld = { left: false, right: false };
     this.contactKey = '';
     this.baseAngle = 0;
     this.startWheelAngle = 0;
     this.wheelAngle = 0;
-    this.tips = [new Vector3(), new Vector3(), new Vector3(), new Vector3()];
-    this.tipCount = 0;
+    this.knobHeldBy = null;
+    this.knobOffset = 0;
     this.shiftLatched = false;
     this.keys = { left: false, right: false, up: false, down: false };
 
@@ -63,18 +108,14 @@ export class CockpitSystem extends createSystem({
     const leverObject = createGearLever();
     leverObject.position.fromArray(LEVER_POSITION);
     this.lever = this.world.createTransformEntity(leverObject, { parent: root });
+    this.leverObject = leverObject;
     this.stick = leverObject.getObjectByName('lever-stick');
     this.knobY = this.stick.position.y + LEVER.height;
     const knobObject = createGearKnob();
     knobObject.position.set(0, this.knobY, 0);
+    // El pomo no usa el sistema de agarre de IWSDK (que acepta pinza):
+    // aquí sólo se acepta agarre de bola.
     this.knob = this.world.createTransformEntity(knobObject, { parent: this.lever });
-    // Sólo se desliza adelante/atrás por la guía.
-    this.knob.addComponent(OneHandGrabbable, {
-      rotate: false,
-      translate: true,
-      translateMin: [0, this.knobY, -LEVER.travel],
-      translateMax: [0, this.knobY, LEVER.travel],
-    });
 
     const onKey = (event, down) => {
       switch (event.code) {
@@ -115,59 +156,91 @@ export class CockpitSystem extends createSystem({
 
   // ------------------------------------------------------------ hand data
 
-  /** Posición del agarre de cada mano/control en el plano del volante. */
-  readGrips() {
+  /** Lee agarre, articulaciones y botones de cada mano o control. */
+  readHands() {
     const xr = this.input.xr;
-    for (const hand of HANDS) {
-      this.onRim[hand] = false;
-      const source = xr?.getPrimaryInputSource?.(hand);
-      const grip = this.player.gripSpaces?.[hand];
-      if (source == null || grip == null) {
-        continue;
-      }
-      grip.getWorldPosition(this.vec);
-      const p = this.pivot.worldToLocal(this.handLocal[hand].copy(this.vec));
-      const radial = Math.hypot(p.x, p.y);
-      this.onRim[hand] = Math.abs(radial - WHEEL.radius) < RIM_TOLERANCE && Math.abs(p.z) < RIM_DEPTH;
-    }
-  }
-
-  /** Puntas de pulgar e índice de las manos (seguimiento de manos). */
-  readFingertips() {
-    this.tipCount = 0;
     const frame = this.renderer.xr.getFrame?.();
     const refSpace = this.renderer.xr.getReferenceSpace?.();
-    if (frame == null || refSpace == null || frame.getJointPose == null) {
-      return;
-    }
-    for (const hand of HANDS) {
-      const source = this.input.xr?.getPrimaryInputSource?.(hand);
-      if (source?.hand == null) {
+    for (const handedness of HANDS) {
+      const hand = this.hands[handedness];
+      const source = xr?.getPrimaryInputSource?.(handedness);
+      const grip = this.player.gripSpaces?.[handedness];
+      hand.present = source != null && grip != null;
+      hand.tracked = false;
+      if (!hand.present) {
         continue;
       }
-      for (const jointName of TIP_JOINTS) {
-        const joint = source.hand.get(jointName);
+      grip.getWorldPosition(hand.grip);
+      hand.grasp.copy(hand.grip);
+      const pad = xr.gamepads?.[handedness];
+      hand.squeeze = pad?.getButtonValue?.('xr-standard-squeeze') ?? 0;
+      hand.trigger = pad?.getButtonValue?.('xr-standard-trigger') ?? 0;
+
+      if (source.hand == null || frame?.getJointPose == null || refSpace == null) {
+        continue;
+      }
+      let ok = true;
+      for (const name of JOINTS) {
+        const joint = source.hand.get(name);
         const pose = joint ? frame.getJointPose(joint, refSpace) : null;
         if (pose == null) {
-          continue;
+          ok = false;
+          break;
         }
         const p = pose.transform.position;
-        const tip = this.tips[this.tipCount];
-        tip.set(p.x, p.y, p.z);
-        this.player.localToWorld(tip);
-        this.tipCount += 1;
+        this.player.localToWorld(hand.joints[name].set(p.x, p.y, p.z));
       }
+      if (!ok) {
+        continue;
+      }
+      const j = hand.joints;
+      const wrist = j.wrist;
+      const curl = (tip, base) => j[tip].distanceTo(wrist) / Math.max(1e-4, j[base].distanceTo(wrist));
+      hand.curl.index = curl('index-finger-tip', 'index-finger-phalanx-proximal');
+      hand.curl.middle = curl('middle-finger-tip', 'middle-finger-phalanx-proximal');
+      hand.curl.ring = curl('ring-finger-tip', 'ring-finger-phalanx-proximal');
+      hand.thumbGap = j['thumb-tip'].distanceTo(j['index-finger-tip']);
+      // Centro de la mano que rodea el pomo: puntas + base del dedo medio.
+      hand.grasp
+        .copy(j['thumb-tip'])
+        .add(j['index-finger-tip'])
+        .add(j['middle-finger-tip'])
+        .add(j['ring-finger-tip'])
+        .add(j['middle-finger-metacarpal'])
+        .multiplyScalar(0.2);
+      hand.tracked = true;
     }
   }
 
-  /**
-   * ¿Alguna punta de dedo está apoyada sobre este botón? Se mide en el plano
-   * del volante: dentro del círculo del botón (con 1 cm de margen) y a menos
-   * de ~1,5 cm por encima de su cara. Al levantar el pulgar se suelta.
-   */
+  /** Prensión digitopalmar: índice, medio y anular cerrados (pulgar libre). */
+  isPalmarGrip(hand) {
+    if (!hand.present) return false;
+    if (!hand.tracked) return hand.squeeze > 0.5;
+    const { index, middle, ring } = hand.curl;
+    return index < PALMAR_MAX_CURL && middle < PALMAR_MAX_CURL && ring < PALMAR_MAX_CURL;
+  }
+
+  /** Agarre de bola: dedos semiflexionados y pulgar separado (no pinza). */
+  isBallGrip(hand, loose) {
+    if (!hand.present) return false;
+    if (!hand.tracked) return hand.squeeze > 0.5;
+    const margin = loose ? 0.1 : 0;
+    const avg = (hand.curl.index + hand.curl.middle + hand.curl.ring) / 3;
+    return (
+      avg > BALL_MIN_CURL - margin &&
+      avg < BALL_MAX_CURL + margin &&
+      hand.thumbGap > BALL_MIN_THUMB_GAP - margin * 0.1
+    );
+  }
+
+  /** ¿El pulgar de alguna mano está apoyado sobre este botón? */
   buttonTouched(button) {
-    for (let i = 0; i < this.tipCount; i += 1) {
-      const p = this.spinner.worldToLocal(this.local.copy(this.tips[i]));
+    for (const handedness of HANDS) {
+      const hand = this.hands[handedness];
+      if (!hand.tracked) {
+        continue;
+      }
+      const p = this.spinner.worldToLocal(this.local.copy(hand.joints['thumb-tip']));
       const dx = p.x - button.position.x;
       const dy = p.y - button.position.y;
       if (Math.hypot(dx, dy) < WHEEL.buttonRadius + 0.01 && p.z > -0.012 && p.z < 0.03) {
@@ -177,11 +250,39 @@ export class CockpitSystem extends createSystem({
     return false;
   }
 
-  // ---------------------------------------------------------------- frame
+  // ---------------------------------------------------------------- wheel
+
+  /** Actualiza qué manos sujetan el volante (sólo a las 9 y a las 3). */
+  updateWheelHold() {
+    for (const handedness of HANDS) {
+      const hand = this.hands[handedness];
+      if (!this.isPalmarGrip(hand)) {
+        this.wheelHeld[handedness] = false;
+        continue;
+      }
+      // Posición en el plano del volante (sin girar) para medir el giro.
+      const p = this.pivot.worldToLocal(this.handLocal[handedness].copy(hand.grip));
+      const radial = Math.hypot(p.x, p.y);
+      if (this.wheelHeld[handedness]) {
+        // Mientras sujeta, sólo se suelta al abrir la mano o alejarse del aro.
+        this.wheelHeld[handedness] =
+          Math.abs(radial - WHEEL.radius) < RIM_RELEASE_TOLERANCE && Math.abs(p.z) < RIM_DEPTH * 1.2;
+        continue;
+      }
+      // Para empezar a sujetar: la mano tiene que estar en su empuñadura,
+      // medida sobre el volante (que puede estar girado).
+      const s = this.spinner.worldToLocal(this.local.copy(hand.grip));
+      const angle = Math.atan2(s.y, s.x);
+      const target = handedness === 'left' ? Math.PI : 0;
+      const offset = Math.abs(Math.atan2(Math.sin(angle - target), Math.cos(angle - target)));
+      this.wheelHeld[handedness] =
+        offset < GRIP_ZONE && Math.abs(radial - WHEEL.radius) < RIM_TOLERANCE && Math.abs(p.z) < RIM_DEPTH;
+    }
+  }
 
   updateWheel(dt) {
-    const left = this.onRim.left;
-    const right = this.onRim.right;
+    const left = this.wheelHeld.left;
+    const right = this.wheelHeld.right;
     const key = `${left}|${right}`;
     let handAngle = null;
     if (left && right) {
@@ -194,7 +295,7 @@ export class CockpitSystem extends createSystem({
     }
 
     if (handAngle != null) {
-      // Al cambiar qué manos tocan el aro, se toma una nueva referencia.
+      // Al cambiar qué manos sujetan, se toma una nueva referencia.
       if (key !== this.contactKey) {
         this.contactKey = key;
         this.baseAngle = handAngle;
@@ -225,57 +326,85 @@ export class CockpitSystem extends createSystem({
   }
 
   updatePedals() {
-    const pads = this.input.xr?.gamepads;
-    const leftTrigger = pads?.left?.getButtonValue?.('xr-standard-trigger') ?? 0;
-    const rightTrigger = pads?.right?.getButtonValue?.('xr-standard-trigger') ?? 0;
-    const brakeTouch = this.buttonTouched(this.brakeButton);
+    // Izquierda acelera, derecha frena (botones y gatillos).
     const throttleTouch = this.buttonTouched(this.throttleButton);
-    const brake = Math.max(brakeTouch ? 1 : 0, leftTrigger, this.keys.down ? 1 : 0);
-    const throttle = Math.max(throttleTouch ? 1 : 0, rightTrigger, this.keys.up ? 1 : 0);
+    const brakeTouch = this.buttonTouched(this.brakeButton);
+    const throttle = Math.max(throttleTouch ? 1 : 0, this.hands.left.trigger, this.keys.up ? 1 : 0);
+    const brake = Math.max(brakeTouch ? 1 : 0, this.hands.right.trigger, this.keys.down ? 1 : 0);
     // El botón se hunde y se ilumina al pulsarlo.
-    this.brakeButton.position.z = this.buttonZ - 0.005 * brake;
     this.throttleButton.position.z = this.buttonZ - 0.005 * throttle;
-    this.brakeButton.material.emissiveIntensity = 0.25 + brake * 1.5;
+    this.brakeButton.position.z = this.buttonZ - 0.005 * brake;
     this.throttleButton.material.emissiveIntensity = 0.25 + throttle * 1.5;
+    this.brakeButton.material.emissiveIntensity = 0.25 + brake * 1.5;
     return { brake, throttle };
   }
+
+  // ---------------------------------------------------------------- lever
 
   updateLever(dt) {
     const knob = this.knob.object3D;
     const travel = LEVER.travel;
-    if (this.knob.hasComponent(Grabbed)) {
-      const z = knob.position.z;
-      if (!this.shiftLatched && z < -travel * 0.7) {
-        this.race.shift(1);
-        this.shiftLatched = true;
-      } else if (!this.shiftLatched && z > travel * 0.7) {
-        this.race.shift(-1);
-        this.shiftLatched = true;
-      } else if (Math.abs(z) < travel * 0.3) {
-        this.shiftLatched = false;
+    knob.getWorldPosition(this.vec);
+
+    if (this.knobHeldBy == null) {
+      for (const handedness of HANDS) {
+        const hand = this.hands[handedness];
+        const grabPoint = hand.tracked ? hand.grasp : hand.grip;
+        if (this.isBallGrip(hand, false) && grabPoint.distanceTo(this.vec) < KNOB_GRAB_DISTANCE) {
+          this.knobHeldBy = handedness;
+          this.leverObject.worldToLocal(this.local.copy(grabPoint));
+          this.knobOffset = this.local.z - knob.position.z;
+          break;
+        }
       }
+    } else {
+      const hand = this.hands[this.knobHeldBy];
+      const grabPoint = hand.tracked ? hand.grasp : hand.grip;
+      if (!this.isBallGrip(hand, true) || grabPoint.distanceTo(this.vec) > KNOB_RELEASE_DISTANCE) {
+        this.knobHeldBy = null;
+      }
+    }
+
+    if (this.knobHeldBy != null) {
+      const hand = this.hands[this.knobHeldBy];
+      this.leverObject.worldToLocal(this.local.copy(hand.tracked ? hand.grasp : hand.grip));
+      knob.position.z = this.local.z - this.knobOffset;
     } else {
       // Muelle de regreso al centro.
       knob.position.z *= Math.exp(-dt * 12);
-      this.shiftLatched = false;
     }
     knob.position.x = 0;
     knob.position.y = this.knobY;
     knob.position.z = Math.max(-travel, Math.min(travel, knob.position.z));
     this.stick.rotation.x = Math.asin(knob.position.z / LEVER.height);
+
+    const z = knob.position.z;
+    if (this.knobHeldBy != null && !this.shiftLatched && z < -travel * 0.7) {
+      this.race.shift(1);
+      this.shiftLatched = true;
+    } else if (this.knobHeldBy != null && !this.shiftLatched && z > travel * 0.7) {
+      this.race.shift(-1);
+      this.shiftLatched = true;
+    } else if (Math.abs(z) < travel * 0.3) {
+      this.shiftLatched = false;
+    }
   }
+
+  // ---------------------------------------------------------------- frame
 
   update(delta) {
     const dt = Math.min(delta, 0.05);
     const immersive = this.world.visibilityState.peek() !== VisibilityState.NonImmersive;
     if (immersive) {
-      this.readGrips();
-      this.readFingertips();
+      this.readHands();
     } else {
-      this.onRim.left = false;
-      this.onRim.right = false;
-      this.tipCount = 0;
+      for (const handedness of HANDS) {
+        this.hands[handedness].present = false;
+        this.hands[handedness].tracked = false;
+        this.hands[handedness].trigger = 0;
+      }
     }
+    this.updateWheelHold();
     const steer = this.updateWheel(dt);
     const { brake, throttle } = this.updatePedals();
     this.updateLever(dt);

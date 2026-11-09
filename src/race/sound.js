@@ -108,6 +108,33 @@ export class RaceSound {
     this.tone(90, 0, 0.25, 'triangle', 0.4);
   }
 
+  /** Clic mecánico al cambiar de marcha. */
+  shift() {
+    if (!this.ensure()) {
+      return;
+    }
+    this.tone(1400, 0, 0.04, 'square', 0.15);
+    this.tone(700, 0.03, 0.05, 'square', 0.12);
+  }
+
+  /** Chirrido de neumáticos (derrape o frenazo). */
+  skid() {
+    if (!this.ensure()) {
+      return;
+    }
+    const ctx = this.ctx;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(900, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(500, ctx.currentTime + 0.45);
+    gain.gain.setValueAtTime(0.12, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+    osc.connect(gain).connect(this.master);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.55);
+  }
+
   finish() {
     if (!this.ensure()) {
       return;

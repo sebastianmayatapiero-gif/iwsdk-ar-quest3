@@ -2,7 +2,9 @@
  * Lógica principal del juego de carreras:
  *  - colocación de la pista sobre la mesa (hit-test + planos detectados),
  *  - la pista avanza bajo el carro (el carro no se desplaza hacia adelante),
- *  - el carro se agarra con la mano y sólo se mueve a izquierda/derecha,
+ *  - motor con 4 marchas: acelerador, freno y RPM (CockpitSystem da las
+ *    entradas del volante, los botones y la palanca),
+ *  - tramos que piden cambiar de marcha: subidas, barro, curvas y rampa,
  *  - choques con obstáculos (salen volando con física), vidas y meta.
  *
  * Coordenadas locales de la pista ("race-root"): +X a la derecha del
@@ -14,12 +16,9 @@ import {
   createSystem,
   DepthOccludable,
   EnvironmentRaycastTarget,
-  Grabbed,
-  GrabSystem,
   Group,
   Mesh,
   MeshStandardMaterial,
-  OneHandGrabbable,
   PhysicsBody,
   PhysicsManipulation,
   PhysicsShape,
@@ -39,39 +38,72 @@ import {
   createFinishLine,
   createPlacementReticle,
   createRaceCar,
+  createRamp,
+  createSpeedSign,
   createTrackBase,
   OBSTACLE_FACTORIES,
   OBSTACLE_RADIUS,
   PLAY_AREA,
 } from '../scene-assets/race.scene-asset.js';
 import { RaceSound } from './sound.js';
-import { createRoadTexture, ROAD_HALF_WIDTH, samplePose, TEXTURE_REPEAT_LENGTH, TRACK } from './track.js';
+import {
+  createRoadTexture,
+  elevationAt,
+  ROAD_HALF_WIDTH,
+  samplePose,
+  TEXTURE_REPEAT_LENGTH,
+  TRACK,
+  upcomingZone,
+  ZONES,
+  zoneAt,
+} from './track.js';
 
-const ROAD_Y = PLAY_AREA.height + 0.0006;
-/** Posición fija del carro sobre la zona de juego (cerca del jugador). */
-export const CAR_Z = 0.17;
+/** Altura del asfalto: un poco por encima de la base para evitar parpadeos. */
+const ROAD_Y = PLAY_AREA.lift + PLAY_AREA.height + 0.0015;
+/** Posición fija del carro: algo por delante del centro para que el volante no lo tape. */
+export const CAR_Z = -0.04;
 const VIEW_BEHIND = PLAY_AREA.length / 2 - CAR_Z + 0.03;
 const VIEW_AHEAD = PLAY_AREA.length / 2 + CAR_Z + 0.03;
-const RIBBON_SEGMENTS = 72;
+const RIBBON_SEGMENTS = 80;
 export const CAR_LIMIT = ROAD_HALF_WIDTH - CAR_SIZE.width / 2 - 0.005;
 /** Donde queda la pista cuando no hay sesión de RA (vista de escritorio). */
 const DEFAULT_ROOT_POSITION = [0, 0.78, -0.55];
 const POOL_PER_TYPE = 6;
 export const FINISH_DISTANCE = TRACK.length - 1.2;
-const BASE_SPEED = 0.16;
-const SPEED_GAIN = 0.3;
-export const MAX_SPEED = BASE_SPEED + SPEED_GAIN;
 const INVULNERABLE_TIME = 1.2;
 const DEBRIS_LIFETIME = 2.5;
-const KEYBOARD_SPEED = 0.25;
+const STEER_RATE = 0.22;
 const OBSTACLE_HEIGHT = { cone: 0.03, barrel: 0.026, crate: 0.022 };
-/** Factor para mostrar la velocidad en "km/h" de un carro a escala 1:64. */
-export const SPEED_TO_KMH = 3.6 * 64;
+/**
+ * Factor para mostrar la velocidad en "km/h" de un carro a escala 1:87 (H0).
+ * Así 120 km/h son ~0,38 m/s sobre la mesa y da tiempo a reaccionar.
+ */
+export const SPEED_TO_KMH = 3.6 * 87;
+
+// ------------------------------------------------------------ motor/marchas
+export const GEAR_COUNT = 4;
+/** Velocidad máxima de cada marcha (km/h). El índice 0 no se usa. */
+export const GEAR_MAX_KMH = [0, 35, 60, 90, 120];
+/** Aceleración a fondo en la banda de potencia (km/h por segundo). */
+const GEAR_ACCEL = [0, 26, 18, 13, 10];
+export const IDLE_RPM = 900;
+export const REDLINE_RPM = 7000;
+export const MAX_RPM = 8000;
+const RPM_AT_GEAR_MAX = 7500;
+/** Cuánta fuerza conserva cada marcha en subida y en barro. */
+const HILL_FACTOR = [0, 1, 0.75, 0.15, 0.05];
+const MUD_FACTOR = [0, 1, 0.8, 0.2, 0.08];
+const ZONE_COLORS = {
+  mud: [0.62, 0.45, 0.28],
+  curve: [1, 0.8, 0.8],
+  hill: [1, 0.96, 0.86],
+};
+const JUMP_LENGTH = 0.45;
+const JUMP_HEIGHT = 0.05;
 
 export class RaceSystem extends createSystem({
   roots: { required: [RaceState] },
   planes: { required: [XRPlane] },
-  grabbedCars: { required: [OneHandGrabbable, Grabbed] },
 }) {
   init() {
     // Temporales reutilizables (sin asignaciones por frame).
@@ -79,14 +111,16 @@ export class RaceSystem extends createSystem({
     this.samplePoseTmp = { x: 0, y: 0, heading: 0 };
     this.localTmp = { x: 0, z: 0, heading: 0 };
     this.statusText = 'Pulsa Iniciar para correr';
+    this.hintText = '';
     this.vecA = new Vector3();
     this.vecB = new Vector3();
     this.quatA = new Quaternion();
     this.up = new Vector3(0, 1, 0);
     this.hitObstacles = new Uint8Array(TRACK.obstacles.length);
+    this.zonePenalized = new Uint8Array(ZONES.length);
     this.invulnerable = 0;
+    this.jumpStart = -1;
     this.debris = [];
-    this.keys = { left: false, right: false };
     this.sound = new RaceSound();
     this.reticleValid = false;
     this.reticleOnTable = false;
@@ -94,26 +128,14 @@ export class RaceSystem extends createSystem({
     this.createEntities();
     this.resetRace();
 
-    const onKey = (event, down) => {
-      if (event.code === 'ArrowLeft' || event.code === 'KeyA') {
-        this.keys.left = down;
-      } else if (event.code === 'ArrowRight' || event.code === 'KeyD') {
-        this.keys.right = down;
-      } else if (down && event.code === 'Space') {
-        const phase = this.phase;
-        if (phase === RacePhase.Racing) {
-          return;
-        }
+    const keyDown = (event) => {
+      if (event.code === 'Space' && this.phase !== RacePhase.Racing) {
         this.startRace();
       }
     };
-    const keyDown = (event) => onKey(event, true);
-    const keyUp = (event) => onKey(event, false);
     window.addEventListener('keydown', keyDown);
-    window.addEventListener('keyup', keyUp);
     this.cleanupFuncs.push(
       () => window.removeEventListener('keydown', keyDown),
-      () => window.removeEventListener('keyup', keyUp),
       this.world.visibilityState.subscribe((state) => this.onVisibilityChange(state)),
       () => this.sound.stopEngine(),
     );
@@ -125,10 +147,10 @@ export class RaceSystem extends createSystem({
     const world = this.world;
     this.root = world.createTransformEntity(new Group());
     this.root.object3D.name = 'race-root';
-    this.root.addComponent(RaceState, { phase: RacePhase.Ready, lives: 3, placed: false });
+    this.root.addComponent(RaceState, { phase: RacePhase.Ready, lives: 3, placed: false, gear: 1 });
     this.root.object3D.position.fromArray(DEFAULT_ROOT_POSITION);
 
-    // Base translúcida con borde luminoso.
+    // Base translúcida flotante con borde luminoso.
     const baseObject = createTrackBase();
     baseObject.traverse((child) => {
       child.receiveShadow = true;
@@ -150,6 +172,7 @@ export class RaceSystem extends createSystem({
     const geometry = new BufferGeometry();
     this.roadPositions = new Float32Array(vertexCount * 3);
     this.roadUvs = new Float32Array(vertexCount * 2);
+    this.roadColors = new Float32Array(vertexCount * 3).fill(1);
     const normals = new Float32Array(vertexCount * 3);
     for (let i = 0; i < vertexCount; i += 1) {
       normals[i * 3 + 1] = 1;
@@ -165,11 +188,16 @@ export class RaceSystem extends createSystem({
     geometry.setAttribute('position', new BufferAttribute(this.roadPositions, 3));
     geometry.setAttribute('uv', new BufferAttribute(this.roadUvs, 2));
     geometry.setAttribute('normal', new BufferAttribute(normals, 3));
+    geometry.setAttribute('color', new BufferAttribute(this.roadColors, 3));
     geometry.setIndex(indices);
     const roadMaterial = new MeshStandardMaterial({
       map: createRoadTexture(),
       roughness: 0.85,
+      vertexColors: true,
       clippingPlanes: this.clipPlanes,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
     });
     const roadMesh = new Mesh(geometry, roadMaterial);
     roadMesh.name = 'race-road';
@@ -179,30 +207,47 @@ export class RaceSystem extends createSystem({
     this.road = world.createTransformEntity(roadMesh, { parent: this.root });
     this.road.addComponent(DepthOccludable);
 
+    const clipped = (object) => {
+      object.traverse((child) => {
+        if (child.isMesh) {
+          child.material = child.material.clone();
+          child.material.clippingPlanes = this.clipPlanes;
+        }
+      });
+      return object;
+    };
+
     // Línea de meta.
-    const finishObject = createFinishLine(ROAD_HALF_WIDTH * 2);
-    finishObject.traverse((child) => {
-      if (child.isMesh) {
-        child.material = child.material.clone();
-        child.material.clippingPlanes = this.clipPlanes;
-      }
-    });
-    this.finish = world.createTransformEntity(finishObject, { parent: this.root });
+    this.finish = world.createTransformEntity(clipped(createFinishLine(ROAD_HALF_WIDTH * 2)), { parent: this.root });
     this.finish.addComponent(DepthOccludable);
 
-    // Carro: se agarra con la mano y sólo se desliza a lo ancho de la pista.
+    // Rampa y señales de límite de velocidad de las curvas.
+    this.zoneProps = [];
+    for (const zone of ZONES) {
+      let object = null;
+      let lateral = 0;
+      if (zone.type === 'ramp') {
+        object = createRamp(ROAD_HALF_WIDTH * 1.8);
+      } else if (zone.type === 'curve') {
+        object = createSpeedSign(zone.limitKmh);
+        lateral = -(ROAD_HALF_WIDTH + 0.025);
+      }
+      if (object == null) {
+        continue;
+      }
+      object.visible = false;
+      const entity = world.createTransformEntity(clipped(object), { parent: this.root });
+      entity.addComponent(DepthOccludable);
+      this.zoneProps.push({ zone, entity, lateral });
+    }
+
+    // Carro: se conduce con el volante (CockpitSystem).
     const carObject = createRaceCar();
     carObject.traverse((child) => {
       child.castShadow = true;
     });
     carObject.position.set(0, ROAD_Y, CAR_Z);
     this.car = world.createTransformEntity(carObject, { parent: this.root });
-    this.car.addComponent(OneHandGrabbable, {
-      rotate: false,
-      translate: true,
-      translateMin: [-CAR_LIMIT, ROAD_Y, CAR_Z],
-      translateMax: [CAR_LIMIT, ROAD_Y, CAR_Z],
-    });
     this.car.addComponent(DepthOccludable);
 
     // Reserva de obstáculos que se reutilizan al pasar por la ventana visible.
@@ -242,8 +287,9 @@ export class RaceSystem extends createSystem({
     // Caja gruesa (10 cm) con la cara superior al nivel de la base: si fuera
     // tan fina como la base, las piezas rápidas la atravesarían.
     const thickness = 0.1;
+    const top = PLAY_AREA.lift + PLAY_AREA.height;
     this.root.object3D.updateWorldMatrix(true, false);
-    this.vecA.set(0, PLAY_AREA.height - thickness / 2, 0);
+    this.vecA.set(0, top - thickness / 2, 0);
     this.root.object3D.localToWorld(this.vecA);
     holder.position.copy(this.vecA);
     holder.quaternion.copy(this.root.object3D.quaternion);
@@ -272,18 +318,22 @@ export class RaceSystem extends createSystem({
   }
 
   resetRace() {
-    const grab = this.world.getSystem(GrabSystem);
-    if (grab != null && this.car.hasComponent(Grabbed)) {
-      grab.forceRelease(this.car);
-    }
-    this.root.setValue(RaceState, 'distance', 0);
-    this.root.setValue(RaceState, 'speed', 0);
-    this.root.setValue(RaceState, 'lives', 3);
-    this.root.setValue(RaceState, 'elapsed', 0);
-    this.root.setValue(RaceState, 'crashes', 0);
-    this.root.setValue(RaceState, 'carOffset', 0);
+    const state = this.root;
+    state.setValue(RaceState, 'distance', 0);
+    state.setValue(RaceState, 'speed', 0);
+    state.setValue(RaceState, 'lives', 3);
+    state.setValue(RaceState, 'elapsed', 0);
+    state.setValue(RaceState, 'crashes', 0);
+    state.setValue(RaceState, 'carOffset', 0);
+    state.setValue(RaceState, 'gear', 1);
+    state.setValue(RaceState, 'rpm', IDLE_RPM);
+    state.setValue(RaceState, 'assist', 0);
+    state.setValue(RaceState, 'zone', '');
     this.hitObstacles.fill(0);
+    this.zonePenalized.fill(0);
     this.invulnerable = 0;
+    this.jumpStart = -1;
+    this.hintText = '';
     this.car.object3D.position.set(0, ROAD_Y, CAR_Z);
     this.car.object3D.visible = true;
     for (const item of this.debris) {
@@ -305,7 +355,7 @@ export class RaceSystem extends createSystem({
     }
     this.setPhase(RacePhase.Racing);
     // La fuente del panel no tiene tildes ni "¡": los mensajes van en ASCII.
-    this.setStatus('Agarra el carro y esquiva los obstaculos');
+    this.setStatus('Acelera con el boton azul y esquiva los obstaculos');
     this.sound.countdown();
     this.sound.startEngine();
   }
@@ -317,6 +367,16 @@ export class RaceSystem extends createSystem({
     this.resetRace();
     this.setPhase(RacePhase.Ready);
     this.setStatus('Pulsa Iniciar para correr');
+  }
+
+  /** Cambio de marcha secuencial (+1 sube, -1 baja). */
+  shift(delta) {
+    const gear = this.root.getValue(RaceState, 'gear');
+    const next = Math.max(1, Math.min(GEAR_COUNT, gear + delta));
+    if (next !== gear) {
+      this.root.setValue(RaceState, 'gear', next);
+      this.sound.shift();
+    }
   }
 
   // ------------------------------------------------------------ placement
@@ -435,43 +495,126 @@ export class RaceSystem extends createSystem({
     this.updateCarControl(dt);
     if (phase === RacePhase.Racing && this.world.visibilityState.peek() !== VisibilityState.VisibleBlurred) {
       this.updateRace(dt);
+    } else {
+      this.updateIdleEngine(dt);
     }
     this.updateTrackVisuals();
     this.updateDebris(dt);
   }
 
   updateCarControl(dt) {
+    const state = this.root;
     const car = this.car.object3D;
-    if (!this.car.hasComponent(Grabbed)) {
-      const dir = (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);
-      car.position.x += dir * KEYBOARD_SPEED * dt;
+    const steer = state.getValue(RaceState, 'steer');
+    const speedKmh = state.getValue(RaceState, 'speed') * SPEED_TO_KMH;
+    // Se gira mejor en movimiento; parado apenas se desplaza.
+    const grip = Math.min(1, 0.25 + speedKmh / 40);
+    if (this.phase === RacePhase.Racing) {
+      car.position.x += steer * STEER_RATE * grip * dt;
     }
-    // Restricción: sólo movimiento lateral dentro de la pista.
     car.position.x = Math.min(CAR_LIMIT, Math.max(-CAR_LIMIT, car.position.x));
-    car.position.y = ROAD_Y;
-    car.position.z = CAR_Z;
-    car.rotation.set(0, 0, 0);
-    this.root.setValue(RaceState, 'carOffset', car.position.x);
+    car.rotation.set(0, -steer * 0.35, 0);
+    state.setValue(RaceState, 'carOffset', car.position.x);
+  }
+
+  /** Sin carrera: RPM al ralentí (o subiendo si se pisa el acelerador). */
+  updateIdleEngine(dt) {
+    const state = this.root;
+    const throttle = state.getValue(RaceState, 'throttle');
+    const target = IDLE_RPM + throttle * 3000;
+    const rpm = state.getValue(RaceState, 'rpm');
+    state.setValue(RaceState, 'rpm', rpm + (target - rpm) * Math.min(1, dt * 6));
   }
 
   updateRace(dt) {
-    const root = this.root;
-    let distance = root.getValue(RaceState, 'distance');
-    let speed = root.getValue(RaceState, 'speed');
-    const target = BASE_SPEED + SPEED_GAIN * Math.min(1, distance / FINISH_DISTANCE);
-    speed += (target - speed) * Math.min(1, dt * 1.2);
+    const state = this.root;
+    let distance = state.getValue(RaceState, 'distance');
+    let kmh = state.getValue(RaceState, 'speed') * SPEED_TO_KMH;
+    const gear = state.getValue(RaceState, 'gear');
+    const throttle = state.getValue(RaceState, 'throttle');
+    const brake = state.getValue(RaceState, 'brake');
+    const zone = this.jumpStart >= 0 ? null : zoneAt(distance);
+
+    // RPM según la velocidad y la marcha.
+    const rpm = IDLE_RPM + (kmh / GEAR_MAX_KMH[gear]) * (RPM_AT_GEAR_MAX - IDLE_RPM);
+    // Fuerza del motor: en 1ª y 2ª siempre empuja (el embrague patina al
+    // arrancar); en 3ª y 4ª con pocas RPM se "ahoga", y cerca del corte
+    // pierde fuerza.
+    let torque = 1;
+    if (gear > 2 && rpm < 1800) {
+      torque = 0.3;
+    } else if (rpm > 6800) {
+      torque = Math.max(0, (RPM_AT_GEAR_MAX - rpm) / (RPM_AT_GEAR_MAX - 6800));
+    }
+    let power = throttle * GEAR_ACCEL[gear] * torque;
+    let drag = 1.5 + kmh * 0.02 + (throttle > 0 ? 0 : 3 + gear);
+    if (zone?.type === 'hill') {
+      power *= HILL_FACTOR[gear];
+      drag += 8;
+    } else if (zone?.type === 'mud') {
+      power *= MUD_FACTOR[gear];
+      drag += 6 + kmh * 0.15;
+    }
+    // Pasado el máximo de la marcha (reducción brusca), el motor frena fuerte.
+    if (kmh > GEAR_MAX_KMH[gear]) {
+      drag += 10 + (kmh - GEAR_MAX_KMH[gear]) * 1.5;
+    }
+    kmh += (power - drag - brake * 45) * dt;
+    kmh = Math.max(0, kmh);
+
+    // Curva cerrada: si entras por encima del límite, derrapas.
+    if (zone?.type === 'curve') {
+      const index = ZONES.indexOf(zone);
+      if (!this.zonePenalized[index] && kmh > zone.limitKmh + 5) {
+        this.zonePenalized[index] = 1;
+        kmh *= 0.45;
+        this.setStatus(`Derrape! Entra a la curva a menos de ${zone.limitKmh} km/h`);
+        this.sound.skid();
+      }
+    }
+
+    // Rampa: con 4ª y velocidad suficiente saltas; si no, el carro se frena
+    // en seco y retrocede un poco para volver a intentarlo.
+    for (let i = 0; i < ZONES.length; i += 1) {
+      const ramp = ZONES[i];
+      if (ramp.type !== 'ramp' || this.jumpStart >= 0) {
+        continue;
+      }
+      if (distance < ramp.start && distance + (kmh / SPEED_TO_KMH) * dt >= ramp.start) {
+        if (gear === 4 && kmh >= ramp.minKmh) {
+          this.jumpStart = ramp.start;
+          this.setStatus('Gran salto!');
+          this.sound.finish();
+        } else {
+          kmh = 0;
+          distance = ramp.start - 1.5;
+          this.setStatus(`Sin impulso: llega a la rampa en 4a y a ${ramp.minKmh} km/h`);
+          this.sound.skid();
+        }
+      }
+    }
+    if (this.jumpStart >= 0 && distance > this.jumpStart + JUMP_LENGTH) {
+      this.jumpStart = -1;
+    }
+
+    const speed = kmh / SPEED_TO_KMH;
     distance += speed * dt;
-    root.setValue(RaceState, 'speed', speed);
-    root.setValue(RaceState, 'distance', distance);
-    root.setValue(RaceState, 'elapsed', root.getValue(RaceState, 'elapsed') + dt);
-    this.sound.setEngineSpeed(speed / MAX_SPEED);
+    state.setValue(RaceState, 'speed', speed);
+    state.setValue(RaceState, 'distance', distance);
+    state.setValue(RaceState, 'elapsed', state.getValue(RaceState, 'elapsed') + dt);
+    const shownRpm = Math.min(MAX_RPM, IDLE_RPM + (kmh / GEAR_MAX_KMH[gear]) * (RPM_AT_GEAR_MAX - IDLE_RPM));
+    state.setValue(RaceState, 'rpm', shownRpm);
+    this.sound.setEngineSpeed((shownRpm - IDLE_RPM) / (MAX_RPM - IDLE_RPM));
+    this.updateAssist(distance, gear, shownRpm, kmh);
 
     if (this.invulnerable > 0) {
       this.invulnerable -= dt;
       this.car.object3D.visible = this.invulnerable <= 0 || Math.floor(this.invulnerable * 10) % 2 === 0;
     }
 
-    this.checkCollisions(distance);
+    if (this.jumpStart < 0) {
+      this.checkCollisions(distance);
+    }
 
     if (this.phase !== RacePhase.Racing) {
       return;
@@ -483,6 +626,36 @@ export class RaceSystem extends createSystem({
       this.sound.stopEngine();
       this.sound.finish();
     }
+  }
+
+  /**
+   * Asistencia de cambio: antes de un tramo especial recomienda la marcha
+   * que pide; fuera de ellos, sube cerca del corte y baja si el motor se ahoga.
+   */
+  updateAssist(distance, gear, rpm, kmh) {
+    const state = this.root;
+    const zone = upcomingZone(distance, 1.2);
+    let assist = 0;
+    let hint = '';
+    if (zone != null) {
+      if (zone.type === 'ramp') {
+        if (gear < 4) assist = 1;
+        hint = `Rampa: 4ª y +${zone.minKmh} km/h`;
+      } else {
+        if (gear > zone.gear) assist = -1;
+        const name = zone.type === 'hill' ? 'Subida' : zone.type === 'mud' ? 'Barro' : `Curva ${zone.limitKmh} km/h`;
+        hint = `${name}: ${zone.type === 'curve' ? 'frena y ' : ''}${assist < 0 ? 'baja' : 'usa'} a ${zone.gear}ª`;
+      }
+    } else if (rpm > 6600 && gear < GEAR_COUNT) {
+      assist = 1;
+      hint = 'Sube de marcha';
+    } else if (gear > 1 && rpm < 1800 && kmh > 1) {
+      assist = -1;
+      hint = 'Baja de marcha';
+    }
+    state.setValue(RaceState, 'assist', assist);
+    state.setValue(RaceState, 'zone', zone?.type ?? '');
+    this.hintText = hint;
   }
 
   checkCollisions(distance) {
@@ -510,12 +683,12 @@ export class RaceSystem extends createSystem({
   }
 
   onCrash(index, carOffset) {
-    const root = this.root;
+    const state = this.root;
     this.hitObstacles[index] = 1;
-    const lives = root.getValue(RaceState, 'lives') - 1;
-    root.setValue(RaceState, 'lives', lives);
-    root.setValue(RaceState, 'crashes', root.getValue(RaceState, 'crashes') + 1);
-    root.setValue(RaceState, 'speed', root.getValue(RaceState, 'speed') * 0.3);
+    const lives = state.getValue(RaceState, 'lives') - 1;
+    state.setValue(RaceState, 'lives', lives);
+    state.setValue(RaceState, 'crashes', state.getValue(RaceState, 'crashes') + 1);
+    state.setValue(RaceState, 'speed', state.getValue(RaceState, 'speed') * 0.3);
     this.invulnerable = INVULNERABLE_TIME;
     this.spawnDebris(index, carOffset);
     this.sound.crash();
@@ -535,7 +708,7 @@ export class RaceSystem extends createSystem({
     const obstacle = TRACK.obstacles[index];
     const height = OBSTACLE_HEIGHT[obstacle.type];
     this.toLocal(obstacle.s, obstacle.lateral, this.localTmp);
-    this.vecA.set(this.localTmp.x, ROAD_Y + height / 2 + 0.002, this.localTmp.z);
+    this.vecA.set(this.localTmp.x, ROAD_Y + elevationAt(obstacle.s) + height / 2 + 0.002, this.localTmp.z);
     this.root.object3D.updateWorldMatrix(true, false);
     this.root.object3D.localToWorld(this.vecA);
 
@@ -597,6 +770,15 @@ export class RaceSystem extends createSystem({
     return out;
   }
 
+  /** Altura del salto sobre la rampa (parábola). */
+  jumpHeight(distance) {
+    if (this.jumpStart < 0) {
+      return 0;
+    }
+    const t = Math.min(1, Math.max(0, (distance - this.jumpStart) / JUMP_LENGTH));
+    return JUMP_HEIGHT * 4 * t * (1 - t);
+  }
+
   updateTrackVisuals() {
     const distance = this.root.getValue(RaceState, 'distance');
     samplePose(distance, this.carPose);
@@ -608,39 +790,50 @@ export class RaceSystem extends createSystem({
       this.clipPlanes[i].copy(this.clipPlanesLocal[i]).applyMatrix4(rootObject.matrixWorld);
     }
 
-    // Cinta de asfalto.
+    // El carro sigue la altura de la pista (subidas) y del salto.
+    this.car.object3D.position.y = ROAD_Y + elevationAt(distance) + this.jumpHeight(distance);
+
+    // Cinta de asfalto con color por tramo (barro, curva, subida).
     const span = VIEW_BEHIND + VIEW_AHEAD;
     const positions = this.roadPositions;
     const uvs = this.roadUvs;
+    const colors = this.roadColors;
     for (let i = 0; i <= RIBBON_SEGMENTS; i += 1) {
       const s = distance - VIEW_BEHIND + (span * i) / RIBBON_SEGMENTS;
+      const y = ROAD_Y + elevationAt(s);
       const left = this.toLocal(s, -ROAD_HALF_WIDTH, this.localTmp);
       let p = i * 6;
       positions[p] = left.x;
-      positions[p + 1] = ROAD_Y;
+      positions[p + 1] = y;
       positions[p + 2] = left.z;
       const right = this.toLocal(s, ROAD_HALF_WIDTH, this.localTmp);
       p += 3;
       positions[p] = right.x;
-      positions[p + 1] = ROAD_Y;
+      positions[p + 1] = y;
       positions[p + 2] = right.z;
       const v = s / TEXTURE_REPEAT_LENGTH;
       uvs[i * 4] = 0;
       uvs[i * 4 + 1] = v;
       uvs[i * 4 + 2] = 1;
       uvs[i * 4 + 3] = v;
+      const zone = zoneAt(s);
+      const color = zone != null ? ZONE_COLORS[zone.type] : null;
+      for (let k = 0; k < 2; k += 1) {
+        const c = i * 6 + k * 3;
+        colors[c] = color ? color[0] : 1;
+        colors[c + 1] = color ? color[1] : 1;
+        colors[c + 2] = color ? color[2] : 1;
+      }
     }
-    this.roadGeometry.attributes.position.needsUpdate = true;
-    this.roadGeometry.attributes.uv.needsUpdate = true;
+    const attributes = this.roadGeometry.attributes;
+    attributes.position.needsUpdate = true;
+    attributes.uv.needsUpdate = true;
+    attributes.color.needsUpdate = true;
 
-    // Línea de meta.
-    const finishObject = this.finish.object3D;
-    const finishVisible = Math.abs(FINISH_DISTANCE - distance) < span;
-    finishObject.visible = finishVisible;
-    if (finishVisible) {
-      const local = this.toLocal(FINISH_DISTANCE, 0, this.localTmp);
-      finishObject.position.set(local.x, ROAD_Y + 0.0002, local.z);
-      finishObject.rotation.set(0, -local.heading, 0);
+    // Línea de meta, rampa y señales.
+    this.placeProp(this.finish.object3D, FINISH_DISTANCE, 0, distance);
+    for (const prop of this.zoneProps) {
+      this.placeProp(prop.entity.object3D, prop.zone.start, prop.lateral, distance);
     }
 
     // Obstáculos visibles en la ventana.
@@ -671,7 +864,7 @@ export class RaceSystem extends createSystem({
       this.poolUsage[obstacle.type] = used + 1;
       const object = pool[used].object3D;
       object.visible = true;
-      object.position.set(local.x, ROAD_Y, local.z);
+      object.position.set(local.x, ROAD_Y + elevationAt(obstacle.s), local.z);
       object.rotation.set(0, -local.heading + i * 0.7, 0);
     }
     for (const type in this.pools) {
@@ -679,6 +872,17 @@ export class RaceSystem extends createSystem({
       for (let i = this.poolUsage[type]; i < pool.length; i += 1) {
         pool[i].object3D.visible = false;
       }
+    }
+  }
+
+  /** Coloca un objeto fijo de la pista si está dentro de la ventana visible. */
+  placeProp(object, s, lateral, distance) {
+    const visible = s > distance - VIEW_BEHIND && s < distance + VIEW_AHEAD;
+    object.visible = visible;
+    if (visible) {
+      const local = this.toLocal(s, lateral, this.localTmp);
+      object.position.set(local.x, ROAD_Y + elevationAt(s) + 0.0002, local.z);
+      object.rotation.set(0, -local.heading, 0);
     }
   }
 }

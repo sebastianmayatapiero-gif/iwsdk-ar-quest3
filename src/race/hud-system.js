@@ -7,13 +7,19 @@ import { CanvasTexture, createSystem, Quaternion, SRGBColorSpace, Vector3, Visib
 import { RacePhase, RaceState } from '../race-components.js';
 import { TRACK, samplePose } from './track.js';
 import { AmbientLightSystem } from './ambient-light-system.js';
-import { FINISH_DISTANCE, RaceSystem, SPEED_TO_KMH } from './race-system.js';
+import { FINISH_DISTANCE, GEAR_MAX_KMH, MAX_RPM, RaceSystem, REDLINE_RPM, SPEED_TO_KMH } from './race-system.js';
 
 const PANEL_OFFSET = new Vector3(0, 0.26, -0.43);
 const PANEL_TILT = -0.15;
 const MAP_SIZE = 256;
 const MAP_MARGIN = 20;
 const TEXT_INTERVAL = 0.1;
+const GAUGE_INTERVAL = 0.05;
+const GAUGE_SIZE = 256;
+const MAX_KMH = 120;
+/** Los relojes barren 270 grados, de abajo a la izquierda a abajo a la derecha. */
+const ARC_START = Math.PI * 0.75;
+const ARC_SWEEP = Math.PI * 1.5;
 
 function formatTime(seconds) {
   const minutes = Math.floor(seconds / 60);
@@ -45,8 +51,10 @@ export class HudSystem extends createSystem({
       lives: el('lives-value'),
       time: el('time-value'),
       progress: el('progress-value'),
-      speed: el('speed-value'),
+      gear: el('gear-value'),
       minimap: el('minimap'),
+      rpmGauge: el('rpm-gauge'),
+      speedGauge: el('speed-gauge'),
       start: el('start-button'),
       restart: el('restart-button'),
       place: el('place-button'),
@@ -71,6 +79,153 @@ export class HudSystem extends createSystem({
     }
 
     this.createMinimap();
+    this.gaugeTimer = 0;
+    this.shownRpm = 0;
+    this.shownKmh = 0;
+    this.rpmGauge = this.createGaugeCanvas(this.elements.rpmGauge);
+    this.speedGauge = this.createGaugeCanvas(this.elements.speedGauge);
+    this.drawGauges(0);
+  }
+
+  // --------------------------------------------------------------- gauges
+
+  createGaugeCanvas(element) {
+    const canvas = document.createElement('canvas');
+    canvas.width = GAUGE_SIZE;
+    canvas.height = GAUGE_SIZE;
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
+    element.setProperties({ src: texture });
+    return { canvas, ctx: canvas.getContext('2d'), texture };
+  }
+
+  /** Esfera, marcas, números y aguja de un reloj analógico. */
+  drawDial(ctx, value, max, majorStep, labelScale, redFrom) {
+    const c = GAUGE_SIZE / 2;
+    const radius = 104;
+    ctx.fillStyle = '#0e1116';
+    ctx.fillRect(0, 0, GAUGE_SIZE, GAUGE_SIZE);
+    ctx.lineCap = 'round';
+    // Arco base y zona roja.
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = '#2a303b';
+    ctx.beginPath();
+    ctx.arc(c, c, radius, ARC_START, ARC_START + ARC_SWEEP);
+    ctx.stroke();
+    if (redFrom != null) {
+      ctx.strokeStyle = '#ff3b3b';
+      ctx.beginPath();
+      ctx.arc(c, c, radius, ARC_START + (redFrom / max) * ARC_SWEEP, ARC_START + ARC_SWEEP);
+      ctx.stroke();
+    }
+    // Arco de valor actual.
+    ctx.strokeStyle = '#2ad4ff';
+    ctx.beginPath();
+    ctx.arc(c, c, radius, ARC_START, ARC_START + Math.min(1, value / max) * ARC_SWEEP);
+    ctx.stroke();
+    // Marcas y números.
+    ctx.fillStyle = '#c9ced8';
+    ctx.font = 'bold 17px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let v = 0; v <= max + 1e-6; v += majorStep / 2) {
+      const a = ARC_START + (v / max) * ARC_SWEEP;
+      const major = Math.abs(v / majorStep - Math.round(v / majorStep)) < 1e-6;
+      const inner = radius - (major ? 18 : 11);
+      ctx.strokeStyle = redFrom != null && v >= redFrom ? '#ff6b6b' : '#8b94a7';
+      ctx.lineWidth = major ? 3 : 2;
+      ctx.beginPath();
+      ctx.moveTo(c + Math.cos(a) * inner, c + Math.sin(a) * inner);
+      ctx.lineTo(c + Math.cos(a) * (radius - 6), c + Math.sin(a) * (radius - 6));
+      ctx.stroke();
+      if (major) {
+        const lr = radius - 34;
+        ctx.fillText(String(Math.round(v * labelScale)), c + Math.cos(a) * lr, c + Math.sin(a) * lr);
+      }
+    }
+    // Aguja.
+    const a = ARC_START + Math.min(1, Math.max(0, value / max)) * ARC_SWEEP;
+    ctx.strokeStyle = '#ff5a3c';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(c - Math.cos(a) * 12, c - Math.sin(a) * 12);
+    ctx.lineTo(c + Math.cos(a) * (radius - 14), c + Math.sin(a) * (radius - 14));
+    ctx.stroke();
+    ctx.fillStyle = '#e9eaee';
+    ctx.beginPath();
+    ctx.arc(c, c, 7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /** Flecha de asistencia (verde arriba = subir, naranja abajo = bajar). */
+  drawAssistArrow(ctx, assist, blinkOn) {
+    if (assist === 0 || !blinkOn) {
+      return;
+    }
+    const x = GAUGE_SIZE / 2;
+    const y = GAUGE_SIZE / 2 + 66;
+    const s = 14 * assist;
+    ctx.fillStyle = assist > 0 ? '#3dff8a' : '#ff9a3c';
+    ctx.beginPath();
+    ctx.moveTo(x, y - s * 1.2);
+    ctx.lineTo(x + 15, y);
+    ctx.lineTo(x + 6, y);
+    ctx.lineTo(x + 6, y + s);
+    ctx.lineTo(x - 6, y + s);
+    ctx.lineTo(x - 6, y);
+    ctx.lineTo(x - 15, y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  drawGauges(time) {
+    const state = this.race.root;
+    const rpm = state.getValue(RaceState, 'rpm');
+    const kmh = state.getValue(RaceState, 'speed') * SPEED_TO_KMH;
+    const gear = state.getValue(RaceState, 'gear');
+    const assist = state.getValue(RaceState, 'assist');
+    // Suavizado de agujas.
+    this.shownRpm += (rpm - this.shownRpm) * 0.5;
+    this.shownKmh += (kmh - this.shownKmh) * 0.5;
+
+    // Tacómetro con marcha, flecha de asistencia y consejo.
+    const r = this.rpmGauge.ctx;
+    this.drawDial(r, this.shownRpm, MAX_RPM, 1000, 1 / 1000, REDLINE_RPM);
+    const c = GAUGE_SIZE / 2;
+    r.fillStyle = '#8b94a7';
+    r.font = 'bold 13px sans-serif';
+    r.fillText('RPM x1000', c, c + 30);
+    r.fillStyle = '#fafaf7';
+    r.font = 'bold 50px sans-serif';
+    r.fillText(String(gear), c, c - 18);
+    r.font = 'bold 12px sans-serif';
+    r.fillStyle = '#8b94a7';
+    r.fillText('MARCHA', c, c - 52);
+    this.drawAssistArrow(r, assist, Math.floor(time * 4) % 2 === 0);
+    const hint = this.race.hintText;
+    if (hint) {
+      r.fillStyle = assist > 0 ? '#3dff8a' : assist < 0 ? '#ff9a3c' : '#8fe3ff';
+      r.font = 'bold 16px sans-serif';
+      r.fillText(hint, c, GAUGE_SIZE - 14);
+    }
+    this.rpmGauge.texture.needsUpdate = true;
+
+    // Velocímetro con lectura digital y el máximo de la marcha actual.
+    const v = this.speedGauge.ctx;
+    this.drawDial(v, this.shownKmh, MAX_KMH, 20, 1, null);
+    v.fillStyle = '#fafaf7';
+    v.font = 'bold 40px sans-serif';
+    v.fillText(String(Math.round(this.shownKmh)), c, c + 44);
+    v.fillStyle = '#8b94a7';
+    v.font = 'bold 13px sans-serif';
+    v.fillText('km/h', c, c + 72);
+    // Marca del máximo de la marcha actual.
+    const a = ARC_START + (GEAR_MAX_KMH[gear] / MAX_KMH) * ARC_SWEEP;
+    v.fillStyle = '#ffd23a';
+    v.beginPath();
+    v.arc(c + Math.cos(a) * 104, c + Math.sin(a) * 104, 6, 0, Math.PI * 2);
+    v.fill();
+    this.speedGauge.texture.needsUpdate = true;
   }
 
   // -------------------------------------------------------------- minimap
@@ -250,12 +405,18 @@ export class HudSystem extends createSystem({
     }
   }
 
-  update(delta) {
+  update(delta, time) {
     const state = this.race.root;
     const phase = state.getValue(RaceState, 'phase');
     const immersive = this.world.visibilityState.peek() !== VisibilityState.NonImmersive;
     this.updateButtons(phase, immersive);
     this.placePanel(phase);
+
+    this.gaugeTimer -= delta;
+    if (this.gaugeTimer <= 0) {
+      this.gaugeTimer = GAUGE_INTERVAL;
+      this.drawGauges(time);
+    }
 
     this.textTimer -= delta;
     if (this.textTimer > 0) {
@@ -268,7 +429,7 @@ export class HudSystem extends createSystem({
     this.setText('lives', `${lives} / 3`);
     this.setText('time', formatTime(state.getValue(RaceState, 'elapsed')));
     this.setText('progress', `${Math.min(100, Math.floor((distance / FINISH_DISTANCE) * 100))} %`);
-    this.setText('speed', `${Math.round(state.getValue(RaceState, 'speed') * SPEED_TO_KMH)} km/h`);
+    this.setText('gear', `${state.getValue(RaceState, 'gear')}`);
     const livesColor = lives <= 1 ? '#ff5a5a' : '#fafaf7';
     if (this.lastTexts.livesColor !== livesColor) {
       this.lastTexts.livesColor = livesColor;

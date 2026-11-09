@@ -75,8 +75,58 @@ function buildCenterline() {
 }
 
 /**
+ * Tramos que obligan a cambiar de marcha (distancias en metros de pista):
+ *  - hill: subida, la pista se eleva; pide 1ª o 2ª.
+ *  - mud: barro/arena que frena; pide 1ª o 2ª.
+ *  - curve: curva cerrada con límite de velocidad; pide frenar y 2ª.
+ *  - ramp: rampa de salto; pide 4ª y velocidad alta antes de `start`.
+ */
+export const ZONES = [
+  { type: 'mud', start: 5.0, end: 6.0, gear: 2 },
+  { type: 'curve', start: 9.9, end: 12.3, gear: 2, limitKmh: 45 },
+  { type: 'hill', start: 13.0, end: 14.2, gear: 2, height: 0.03 },
+  { type: 'mud', start: 19.0, end: 20.0, gear: 2 },
+  { type: 'hill', start: 23.2, end: 24.4, gear: 1, height: 0.04 },
+  { type: 'curve', start: 25.2, end: 28.2, gear: 2, limitKmh: 45 },
+  { type: 'ramp', start: 30.4, end: 31.0, gear: 4, minKmh: 75 },
+];
+
+/** Tramo en el que está la distancia `s`, o null. */
+export function zoneAt(s) {
+  for (const zone of ZONES) {
+    if (s >= zone.start && s <= zone.end) {
+      return zone;
+    }
+  }
+  return null;
+}
+
+/** Próximo tramo que empieza dentro de `lookAhead` metros (o el actual). */
+export function upcomingZone(s, lookAhead) {
+  for (const zone of ZONES) {
+    if (s <= zone.end && zone.start - s <= lookAhead) {
+      return zone;
+    }
+  }
+  return null;
+}
+
+/** Altura extra de la pista en `s` (las subidas son una loma suave). */
+export function elevationAt(s) {
+  for (const zone of ZONES) {
+    if (zone.type !== 'hill' || s < zone.start || s > zone.end) {
+      continue;
+    }
+    const t = (s - zone.start) / (zone.end - zone.start);
+    return zone.height * Math.sin(Math.PI * t) ** 2;
+  }
+  return 0;
+}
+
+/**
  * Obstáculos ordenados por distancia. Al principio aparecen sueltos; más
- * adelante aparecen en parejas, pero siempre dejan un carril libre.
+ * adelante aparecen en parejas, pero siempre dejan un carril libre. No se
+ * colocan dentro de los tramos especiales (con un margen) para que sean justos.
  */
 function buildObstacles(length) {
   const random = seededRandom(2026);
@@ -98,8 +148,8 @@ function buildObstacles(length) {
     }
     s += 1.25 - progress * 0.55 + random() * 0.5;
   }
-  list.sort((a, b) => a.s - b.s);
-  return list;
+  const clear = (o) => !ZONES.some((zone) => o.s > zone.start - 0.5 && o.s < zone.end + 0.5);
+  return list.filter(clear).sort((a, b) => a.s - b.s);
 }
 
 const centerline = buildCenterline();

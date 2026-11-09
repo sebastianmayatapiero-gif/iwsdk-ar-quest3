@@ -1,12 +1,13 @@
 <!--
   Panel del juego de carreras. Va detrás de la pista, mirando al jugador.
-  El minimapa (#minimap) recibe una textura dibujada en tiempo real desde
+  El minimapa (#minimap), el tacómetro (#rpm-gauge) y el velocímetro
+  (#speed-gauge) reciben texturas dibujadas en tiempo real desde
   src/race/hud-system.js. Los textos usan sólo ASCII y acentos básicos.
 -->
 <style>
   .panel-root {
     flex-direction: column;
-    width: 600px;
+    width: 780px;
   }
 
   .header {
@@ -54,26 +55,29 @@
 
   .body {
     flex-direction: row;
-    gap: 20px;
+    gap: 16px;
     padding-left: 24px;
     padding-right: 24px;
   }
 
-  .map {
-    width: 250px;
-    height: 250px;
+  .dial {
+    width: 232px;
+    height: 232px;
     border-radius: 14px;
     background-color: #0e1116;
   }
 
   .stats {
-    flex-direction: column;
-    flex-grow: 1;
+    flex-direction: row;
     gap: 10px;
+    padding-top: 14px;
+    padding-left: 24px;
+    padding-right: 24px;
   }
 
   .stat {
     flex-direction: column;
+    flex-grow: 1;
     padding-top: 8px;
     padding-bottom: 8px;
     padding-left: 14px;
@@ -128,24 +132,26 @@
   </div>
   <div id="status-text" class="status">Pulsa Iniciar para correr</div>
   <div class="body">
-    <img id="minimap" class="map" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" />
-    <div class="stats">
-      <div class="stat">
-        <div class="stat-label">VIDAS</div>
-        <div id="lives-value" class="stat-value">3 / 3</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">TIEMPO</div>
-        <div id="time-value" class="stat-value">0:00.0</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">PROGRESO</div>
-        <div id="progress-value" class="stat-value">0 %</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">VELOCIDAD</div>
-        <div id="speed-value" class="stat-value">0 km/h</div>
-      </div>
+    <img id="minimap" class="dial" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" />
+    <img id="rpm-gauge" class="dial" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" />
+    <img id="speed-gauge" class="dial" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" />
+  </div>
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-label">VIDAS</div>
+      <div id="lives-value" class="stat-value">3 / 3</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">TIEMPO</div>
+      <div id="time-value" class="stat-value">0:00.0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">PROGRESO</div>
+      <div id="progress-value" class="stat-value">0 %</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">MARCHA</div>
+      <div id="gear-value" class="stat-value">1</div>
     </div>
   </div>
   <div class="buttons">

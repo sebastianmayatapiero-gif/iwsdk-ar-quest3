@@ -8,7 +8,11 @@ import {
   createCone,
   createCrate,
   createFinishLine,
+  createGearKnob,
+  createGearLever,
   createRaceCar,
+  createRamp,
+  createSteeringWheel,
   createTrackBase,
 } from './scene-assets/race.scene-asset.js';
 
@@ -21,6 +25,10 @@ export default defineAssets({
   'obstacle-cone': createCone(),
   'obstacle-barrel': createBarrel(),
   'obstacle-crate': createCrate(),
+  'steering-wheel': createSteeringWheel(),
+  'gear-lever': createGearLever(),
+  'gear-knob': createGearKnob(),
+  'jump-ramp': createRamp(),
   'race-panel': {
     url: publicAssetUrl('ui/race-panel.uikitml'),
     type: AssetType.UIKitML,

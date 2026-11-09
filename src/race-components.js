@@ -22,4 +22,14 @@ export const RaceState = createComponent('RaceState', {
   crashes: { type: Types.Int16, default: 0 },
   carOffset: { type: Types.Float32, default: 0 },
   placed: { type: Types.Boolean, default: false },
+  // Cabina: entradas del volante, botones y palanca.
+  gear: { type: Types.Int8, default: 1, min: 1, max: 4 },
+  rpm: { type: Types.Float32, default: 900 },
+  throttle: { type: Types.Float32, default: 0 },
+  brake: { type: Types.Float32, default: 0 },
+  steer: { type: Types.Float32, default: 0, help: '-1 izquierda, +1 derecha' },
+  /** Asistencia de cambio: +1 subir, -1 bajar, 0 nada. */
+  assist: { type: Types.Int8, default: 0 },
+  /** Tramo especial actual o próximo: "", "hill", "mud", "curve" o "ramp". */
+  zone: { type: Types.String, default: '' },
 });
